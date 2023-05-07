@@ -4,18 +4,25 @@ from threading import Thread
 from pathlib import Path
 import time
 
+def get_timestamp():
+    return int(time.time())
+
 
 class VideoStream:
     def __init__(self, src):
         self.capture = cv2.VideoCapture(src)
-        self.time_ms = 0
+        self.time_ms = 1
 
     def get_frame(self):
         self.capture.set(cv2.CAP_PROP_POS_MSEC, self.time_ms)
-        (self.status, self.frame) = self.capture.read()
-        rst =  (self.time_ms, self.frame)
-        self.time_ms += 200
+        (status, frame) = self.capture.read()
+        if not status:
+            print(self.time_ms)
+            raise VideoEndException()
+        rst =  (self.time_ms, frame)
+        self.time_ms += 350
         return rst
+
 
 
 class CaptionContainer:
@@ -24,67 +31,68 @@ class CaptionContainer:
         self.instance = None
         self.folder = folder
 
-    @staticmethod 
-    def get_timestamp():
-        return int(time.time())
-
     def init(self, caption):
         self.instance = np.zeros(caption.shape)
 
     def write(self, caption):
-        caption = cv2.cvtColor(caption, cv2.COLOR_BGR2GRAY)
         if self.caption_index == 0:
             self.init(caption)
         self.instance = np.concatenate([self.instance, caption], axis=0)
         self.caption_index += 1
-        if self.caption_index%5 == 0:
+        if self.caption_index%20 == 0:
             self.export()
             self.init(caption)
 
     def export(self):
-        cv2.imwrite(f'{self.folder}/{self.get_timestamp()}.jpg', self.instance)
+        path = self.folder / f'{get_timestamp()}.jpg'
+        cv2.imencode('.jpg', self.instance)[1].tofile(str(path))
+
+
+class VideoEndException(Exception):
+    pass 
 
 
 class Scanner:
     def __init__(self, video_path):
-        self.captions = []
         self.prev_sample = None
-        self.time_start = 0
-        self.last_time = 0
-        self.caption_index = 0
         self.video_folder = Path(video_path).parent
-        self.caption_folder = self.video_folder / 'captions'
-        self.caption_container = CaptionContainer(self.caption_folder)
-        if not self.caption_folder.is_dir():
-            self.caption_folder.mkdir()
+        caption_folder = self.video_folder / f'{Path(video_path).stem}_captions'
+        self.caption_container = CaptionContainer(caption_folder)
+        if not caption_folder.is_dir():
+            caption_folder.mkdir()
         self.stream = VideoStream(video_path)
 
     @staticmethod
     def calc_vector_distance(v1, v2):
         return np.sqrt(np.sum(np.square(v1^v2)))
 
-    def extract_caption(self, caption_lower, caption_upper, white_threshold = 230):
+    def extract_caption(self, matrix, white_threshold = 220):
         time, frame = self.stream.get_frame()
         screen_width = frame.shape[1]
-        sample_left = int(screen_width/2-(caption_upper-caption_lower))
-        sample_right = int(screen_width/2+(caption_upper-caption_lower)) 
-        sample_region = frame[caption_lower:caption_upper,sample_left:sample_right]
-        sample_region = cv2.cvtColor(sample_region, cv2.COLOR_BGR2GRAY)
-        white_map = sample_region > white_threshold  
+        sample_left, caption_lower, sample_right, caption_upper = matrix
+        sample_left = int(screen_width/2-(caption_upper-caption_lower)) if not sample_left else sample_left
+        sample_right = int(screen_width/2+(caption_upper-caption_lower)) if not sample_right else sample_right
+        caption = frame[caption_lower:caption_upper,:]
+        caption = cv2.cvtColor(caption, cv2.COLOR_BGR2GRAY)
+        caption_sample = caption[:,sample_left:sample_right]
+        white_map = caption_sample > white_threshold  
+        # white_map = caption_sample < 20
         white_total = white_map.sum()
         height, width = white_map.shape
         area = width * height
         ratio = white_total / area 
-        # print(ratio)
-        if(ratio<0.05 or ratio>0.8):
+        if(ratio<0.05):
             return None
-        caption = frame[caption_lower:caption_upper,:]
-        self.caption_container.write(caption)
         return time, caption, white_map
 
-    def run(self, caption_lower, caption_upper, white_threshold=230, consistency_threshold=3):
+    def run(self, caption_sample, white_threshold=230, consistency_threshold=10):
         while(True):
-            tmp =  self.extract_caption(caption_lower, caption_upper)
+            try:
+                tmp =  self.extract_caption(caption_sample)
+            except VideoEndException:
+                self.caption_container.export()
+                break
+
             if tmp:
                 time, caption, sample = tmp
                 try:
@@ -95,17 +103,49 @@ class Scanner:
                 except Exception as e:
                     self.prev_sample = sample
                     self.caption_container.write(caption)
-                self.last_time = time
 
 
 if __name__ == '__main__':
-    scanner = Scanner(r'C:\Users\heinz97\Desktop\1.mp4')
-    # rst = scanner.extract_caption(610, 653)
-    # print(rst)
-    scanner.run(610, 653)
-    # video_path = r'G:\字幕专家\2中译英\wp146210元買了2條牛舌，今天做個新奇美食“椒麻牛舌”，又麻又辣，3碗飯都不夠吃！【半吨先生】.mp4'
-    # scan(video_path,625,681)
-    
+    import sys
+    video_path = sys.argv[1]
+    scanner = Scanner(video_path)
+    scanner.run((0, 315, 0, 337)) # 沈帅波
+    # scanner.run((0, 301, 0, 320))  # 老曾 不稳定
+    # scanner.run((0, 280, 0, 312))  # 阿杜早期
+    # scanner.run((0, 293, 0, 325))  # 阿杜晚期
+    # scanner.run((0, 305, 0, 330))  
+    # scanner.run((0, 312, 0, 342))  #凉子访谈
+    # scanner.run((0, 300, 0, 320))  #阿涛访谈
+    # scanner.run((0, 326, 0, 352))  #老谢聊上海
+    # scanner.run((0, 323, 0, 343))  #雪鸡
+    # scanner.run((0, 282, 0, 301)) 
+    # scanner.run((0, 319, 0, 335)) 
+    # scanner.run((0, 317, 0, 341)) #铁锤
+    # scanner.run((0, 299, 0, 321)) #程前
+    # scanner.run((0, 307, 0, 332)) #程前
+    # scanner.run((0, 313, 0, 336))
+    # scanner.run((0, 300, 0, 321)) 
+    # scanner.run((0, 327, 0, 343))  
+    # scanner.run((0, 284, 0, 307)) 
+    # scanner.run((0, 291, 0, 309)) 
+    # scanner.run((0, 312, 0, 335))  #有数研究所
+    # scanner.run((0, 307, 0, 332))  #暴富研究局
+    # scanner.run((0, 327, 0, 346))  #峰弟
+    # scanner.run((0, 314, 0, 336))  #RGB工具人
+    # scanner.run((0, 316, 0, 345))  
+    # scanner.run((0, 303, 0, 319))  # 刘小板
+    # scanner.run((0, 310, 0, 335))  # 浪哥
+    # scanner.run((0, 295, 0, 323))  # 李自然早期
+    # scanner.run((0, 276, 0, 298))  # 李自然
+    # scanner.run((0, 298, 0, 323))  # 金牛刀
+    # scanner.run((0, 300, 0, 323))  # 致富经 厉害财经
+    # scanner.run((0, 302, 0, 322))  # 对话
+    # scanner.run((0, 282, 0, 305))  # 生财有道
+    # scanner.run((0, 289, 0, 315)) # 央视财经
+    # scanner.run((0, 319, 0, 342)) # 央视财经
+    # scanner.run((96, 283, 118, 310)) #1818
+    # scanner.run((0, 657, 0, 706)) # 开开心心
+    # scanner.run((105, 616, 176, 652)) #非诚勿扰
   
 
 
